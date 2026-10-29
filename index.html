@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reconhecimento Facial</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 16px;
+      font-family: system-ui, sans-serif;
+      background: #111; color: #eee;
+      max-width: 520px; margin-inline: auto;
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 12px; }
+    #area { position: relative; width: 100%; background: #000; border-radius: 12px; overflow: hidden; }
+    video, canvas { display: block; width: 100%; }
+    canvas { position: absolute; top: 0; left: 0; height: 100%; }
+    #status { margin: 12px 0; font-size: .95rem; color: #9cf; min-height: 1.4em; }
+    input, button {
+      width: 100%; padding: 14px; margin-top: 8px;
+      font-size: 1rem; border-radius: 10px; border: none;
+    }
+    input { background: #222; color: #fff; }
+    button { background: #2b7cff; color: #fff; font-weight: 600; }
+    button.sec { background: #333; }
+    button.danger { background: #a33; }
+    button:disabled { opacity: .5; }
+    #lista { margin-top: 12px; font-size: .9rem; color: #bbb; }
+    small { color: #888; display: block; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Reconhecimento Facial</h1>
+
+  <div id="area">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div id="status">Carregando modelos de IA...</div>
+
+  <input id="nome" type="text" placeholder="Nome da pessoa a cadastrar">
+  <button id="btnCadastrar" disabled>Cadastrar rosto</button>
+  <button id="btnTrocar" class="sec" disabled>Trocar câmera (frontal/traseira)</button>
+  <button id="btnLimpar" class="danger">Apagar todos os cadastros</button>
+
+  <div id="lista"></div>
+
+  <small>
+    Os dados ficam apenas neste aparelho (localStorage). Use somente com o
+    consentimento das pessoas — rostos são dados pessoais sensíveis (LGPD).
+  </small>
+
+  <!-- Biblioteca de reconhecimento facial -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+
+  <script>
+    // ---------- Referências aos elementos da página ----------
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const statusEl = document.getElementById('status');
+    const nomeInput = document.getElementById('nome');
+    const btnCadastrar = document.getElementById('btnCadastrar');
+    const btnTrocar = document.getElementById('btnTrocar');
+    const btnLimpar = document.getElementById('btnLimpar');
+    const listaEl = document.getElementById('lista');
+
+    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+    const opcoes = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
+
+    let facing = 'user';      // 'user' = câmera frontal, 'environment' = traseira
+    let cadastros = carregar(); // [{ nome, descritor: [128 números] }]
+
+    // ---------- Armazenamento ----------
+    function carregar() {
+      try { return JSON.parse(localStorage.getItem('rostos')) || []; }
+      catch { return []; }
+    }
+    function salvar() {
+      localStorage.setItem('rostos', JSON.stringify(cadastros));
+      mostrarLista();
+    }
+    function mostrarLista() {
+      listaEl.textContent = cadastros.length
+        ? 'Cadastrados: ' + cadastros.map(c => c.nome).join(', ')
+        : 'Nenhum rosto cadastrado ainda.';
+    }
+
+    // ---------- Câmera ----------
+    async function iniciarCamera() {
+      if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 640 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await new Promise(r => video.onloadedmetadata = r);
+      await video.play();
+      overlay.width = video.videoWidth;
+      overlay.height = video.videoHeight;
+    }
+
+    // ---------- Cadastro ----------
+    btnCadastrar.onclick = async () => {
+      const nome = nomeInput.value.trim();
+      if (!nome) { statusEl.textContent = 'Digite um nome primeiro.'; return; }
+
+      statusEl.textContent = 'Analisando rosto...';
+      const r = await faceapi
+        .detectSingleFace(video, opcoes)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+      if (!r) { statusEl.textContent = 'Nenhum rosto encontrado. Tente de novo com boa luz.'; return; }
+
+      cadastros.push({ nome, descritor: Array.from(r.descriptor) });
+      salvar();
+      nomeInput.value = '';
+      statusEl.textContent = `Rosto de "${nome}" cadastrado!`;
+    };
+
+    btnTrocar.onclick = async () => {
+      facing = facing === 'user' ? 'environment' : 'user';
+      await iniciarCamera();
+    };
+
+    btnLimpar.onclick = () => {
+      if (confirm('Apagar todos os rostos cadastrados?')) {
+        cadastros = [];
+        salvar();
+      }
+    };
+
+    // ---------- Reconhecimento (loop contínuo) ----------
+    async function reconhecer() {
+      const ctx = overlay.getContext('2d');
+
+      async function ciclo() {
+        if (video.readyState >= 2) {
+          const resultados = await faceapi
+            .detectAllFaces(video, opcoes)
+            .withFaceLandmarks()
+            .withFaceDescriptors();
+
+          ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+          // Monta o comparador com os rostos salvos
+          let matcher = null;
+          if (cadastros.length) {
+            const rotulados = cadastros.map(c =>
+              new faceapi.LabeledFaceDescriptors(c.nome, [new Float32Array(c.descritor)])
+            );
+            matcher = new faceapi.FaceMatcher(rotulados, 0.55);
+          }
+
+          for (const r of resultados) {
+            const { x, y, width, height } = r.detection.box;
+            let texto = 'Desconhecido';
+            let cor = '#ff4444';
+
+            if (matcher) {
+              const melhor = matcher.findBestMatch(r.descriptor);
+              if (melhor.label !== 'unknown') {
+                texto = melhor.label;
+                cor = '#33dd77';
+              }
+            }
+
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = cor;
+            ctx.strokeRect(x, y, width, height);
+
+            ctx.font = 'bold 20px system-ui';
+            const larg = ctx.measureText(texto).width + 12;
+            ctx.fillStyle = cor;
+            ctx.fillRect(x, y - 28, larg, 28);
+            ctx.fillStyle = '#000';
+            ctx.fillText(texto, x + 6, y - 7);
+          }
+        }
+        setTimeout(ciclo, 150);
+      }
+      ciclo();
+    }
+
+    // ---------- Inicialização ----------
+    (async () => {
+      mostrarLista();
+      try {
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+          faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+        ]);
+        statusEl.textContent = 'Ativando câmera...';
+        await iniciarCamera();
+        statusEl.textContent = 'Pronto! Cadastre um rosto ou aponte a câmera.';
+        btnCadastrar.disabled = false;
+        btnTrocar.disabled = false;
+        reconhecer();
+      } catch (e) {
+        statusEl.textContent = 'Erro: ' + e.message +
+          ' (a câmera exige HTTPS ou localhost e permissão do usuário)';
+      }
+    })();
+  </script>
+</body>
+</html>
