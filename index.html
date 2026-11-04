@@ -69,6 +69,34 @@
     const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
     const opcoes = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
 
+    // ---------- CONFIGURAÇÃO DA PLANILHA ----------
+    // Cole aqui o link gerado pelo Google Apps Script (passo 5 do tutorial)
+    const URL_PLANILHA = 'https://script.google.com/macros/s/AKfycbwn6oTCUa8eteLjjkhSOGlww2I3RorGuBFasHtJQseXw80qRnNUKyUJUn2Pzv-lTuwzyA/exec';
+    // Tempo mínimo (em minutos) para registrar a mesma pessoa de novo
+    const MINUTOS_ENTRE_REGISTROS = 5;
+    const ultimoRegistro = {};
+
+    function registrar(nome) {
+      if (!URL_PLANILHA.startsWith('https://')) return; // ainda não configurado
+      const agora = Date.now();
+      if (ultimoRegistro[nome] && agora - ultimoRegistro[nome] < MINUTOS_ENTRE_REGISTROS * 60000) return;
+      ultimoRegistro[nome] = agora;
+
+      fetch(URL_PLANILHA, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ nome })
+      })
+        .then(() => {
+          statusEl.textContent = `✔ ${nome} enviada para a planilha às ${new Date().toLocaleTimeString('pt-BR')}`;
+        })
+        .catch(() => {
+          delete ultimoRegistro[nome];
+          statusEl.textContent = 'Erro ao enviar para a planilha. Verifique a internet.';
+        });
+    }
+
     let facing = 'user';      // 'user' = câmera frontal, 'environment' = traseira
     let cadastros = carregar(); // [{ nome, descritor: [128 números] }]
 
@@ -164,6 +192,7 @@
               if (melhor.label !== 'unknown') {
                 texto = melhor.label;
                 cor = '#33dd77';
+                registrar(melhor.label);
               }
             }
 
