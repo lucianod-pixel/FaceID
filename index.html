@@ -31,7 +31,7 @@
   </style>
 </head>
 <body>
-  <h1>Reconhecimento Facial (v3)</h1>
+  <h1>Reconhecimento Facial (v4)</h1>
 
   <div id="area">
     <video id="video" autoplay muted playsinline></video>
@@ -76,6 +76,39 @@
     const MINUTOS_ENTRE_REGISTROS = 5;
     const ultimoRegistro = {};
 
+    // ---------- SOM DE CONFIRMAÇÃO ----------
+    // O navegador do celular só permite som depois que a pessoa toca na tela uma vez.
+    let audioCtx = null;
+    function liberarSom() {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) audioCtx = new AC();
+      }
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    }
+    document.addEventListener('click', liberarSom);
+    document.addEventListener('touchstart', liberarSom);
+
+    // Dois bips curtos: um grave e um agudo
+    function tocarSom() {
+      if (!audioCtx) return;
+      const t = audioCtx.currentTime;
+      [880, 1320].forEach((frequencia, i) => {
+        const inicio = t + i * 0.15;
+        const osc = audioCtx.createOscillator();
+        const volume = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = frequencia;
+        volume.gain.setValueAtTime(0.0001, inicio);
+        volume.gain.exponentialRampToValueAtTime(0.3, inicio + 0.02);
+        volume.gain.exponentialRampToValueAtTime(0.0001, inicio + 0.14);
+        osc.connect(volume);
+        volume.connect(audioCtx.destination);
+        osc.start(inicio);
+        osc.stop(inicio + 0.15);
+      });
+    }
+
     function registrar(nome) {
       if (!URL_PLANILHA.startsWith('https://')) {
         statusEl.textContent = '⚠ Reconheci ' + nome + ', mas o link da planilha (URL_PLANILHA) não foi configurado.';
@@ -84,6 +117,7 @@
       const agora = Date.now();
       if (ultimoRegistro[nome] && agora - ultimoRegistro[nome] < MINUTOS_ENTRE_REGISTROS * 60000) return;
       ultimoRegistro[nome] = agora;
+      tocarSom();
 
       fetch(URL_PLANILHA, {
         method: 'POST',
@@ -227,7 +261,7 @@
         ]);
         statusEl.textContent = 'Ativando câmera...';
         await iniciarCamera();
-        statusEl.textContent = 'Pronto! Cadastre um rosto ou aponte a câmera.';
+        statusEl.textContent = 'Pronto! Toque na tela uma vez para ativar o som e aponte a câmera.';
         btnCadastrar.disabled = false;
         btnTrocar.disabled = false;
         reconhecer();
