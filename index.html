@@ -31,7 +31,7 @@
   </style>
 </head>
 <body>
-  <h1>Reconhecimento Facial (v4)</h1>
+  <h1>Reconhecimento Facial (v5)</h1>
 
   <div id="area">
     <video id="video" autoplay muted playsinline></video>
@@ -79,15 +79,32 @@
     // ---------- SOM DE CONFIRMAÇÃO ----------
     // O navegador do celular só permite som depois que a pessoa toca na tela uma vez.
     let audioCtx = null;
+    let vozLiberada = false;
     function liberarSom() {
       if (!audioCtx) {
         const AC = window.AudioContext || window.webkitAudioContext;
         if (AC) audioCtx = new AC();
       }
       if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      // "Acorda" a voz do navegador com um toque do usuário (necessário em celulares)
+      if (!vozLiberada && 'speechSynthesis' in window) {
+        vozLiberada = true;
+        speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+      }
     }
     document.addEventListener('click', liberarSom);
     document.addEventListener('touchstart', liberarSom);
+
+    // Voz falando o nome da pessoa
+    function falar(nome) {
+      if (!('speechSynthesis' in window)) return;
+      speechSynthesis.cancel();
+      const fala = new SpeechSynthesisUtterance(nome + ' reconhecida com sucesso. Obrigado!');
+      fala.lang = 'pt-BR';
+      fala.rate = 1;
+      fala.volume = 1;
+      speechSynthesis.speak(fala);
+    }
 
     // Dois bips curtos: um grave e um agudo
     function tocarSom() {
@@ -118,6 +135,7 @@
       if (ultimoRegistro[nome] && agora - ultimoRegistro[nome] < MINUTOS_ENTRE_REGISTROS * 60000) return;
       ultimoRegistro[nome] = agora;
       tocarSom();
+      setTimeout(() => falar(nome), 400); // fala logo após os bips
 
       fetch(URL_PLANILHA, {
         method: 'POST',
