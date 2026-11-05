@@ -31,7 +31,7 @@
   </style>
 </head>
 <body>
-  <h1>Reconhecimento Facial</h1>
+  <h1>Reconhecimento Facial (v3)</h1>
 
   <div id="area">
     <video id="video" autoplay muted playsinline></video>
@@ -77,7 +77,10 @@
     const ultimoRegistro = {};
 
     function registrar(nome) {
-      if (!URL_PLANILHA.startsWith('https://')) return; // ainda não configurado
+      if (!URL_PLANILHA.startsWith('https://')) {
+        statusEl.textContent = '⚠ Reconheci ' + nome + ', mas o link da planilha (URL_PLANILHA) não foi configurado.';
+        return;
+      }
       const agora = Date.now();
       if (ultimoRegistro[nome] && agora - ultimoRegistro[nome] < MINUTOS_ENTRE_REGISTROS * 60000) return;
       ultimoRegistro[nome] = agora;
