@@ -1,127 +1,373 @@
-// Código para colar no Google Apps Script (dentro da sua planilha) — VERSÃO 3
-// Colunas esperadas na primeira aba: A = NOME, B = EMAIL, C = REGISTRO
-//
-// Este código faz três coisas:
-//  0) "apagar": quando um cadastro é apagado no site, apaga também a linha dele na planilha.
-//  1) "cadastrar": quando uma pessoa é cadastrada no site, cria (ou atualiza) a linha dela na planilha.
-//  2) "registrar": quando uma pessoa é reconhecida, grava data/hora em REGISTRO e envia um e-mail
-//     para o endereço da coluna EMAIL.
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reconhecimento Facial</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 16px;
+      font-family: system-ui, sans-serif;
+      background: #111; color: #eee;
+      max-width: 520px; margin-inline: auto;
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 12px; }
+    #area { position: relative; width: 100%; background: #000; border-radius: 12px; overflow: hidden; }
+    video, canvas { display: block; width: 100%; }
+    canvas { position: absolute; top: 0; left: 0; height: 100%; }
+    #status { margin: 12px 0; font-size: .95rem; color: #9cf; min-height: 1.4em; }
+    input, button {
+      width: 100%; padding: 14px; margin-top: 8px;
+      font-size: 1rem; border-radius: 10px; border: none;
+    }
+    input { background: #222; color: #fff; }
+    button { background: #2b7cff; color: #fff; font-weight: 600; }
+    button.sec { background: #333; }
+    button.danger { background: #a33; }
+    button:disabled { opacity: .5; }
+    #lista { margin-top: 12px; font-size: .9rem; color: #bbb; }
+    small { color: #888; display: block; margin-top: 16px; }
+    .item { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #222; }
+    button.x { width: auto; margin: 0; padding: 6px 14px; background: #a33; }
+  </style>
+</head>
+<body>
+  <h1>Reconhecimento Facial (v7)</h1>
 
-var FUSO = 'America/Sao_Paulo';
+  <div id="area">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
 
-function doPost(e) {
-  var lock = LockService.getScriptLock();
-  try {
-    lock.waitLock(10000); // evita que dois envios simultâneos se atropelem
-    var dados = JSON.parse(e.postData.contents);
-    var acao = dados.acao || 'registrar';
-    var planilha = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+  <div id="status">Carregando modelos de IA...</div>
 
-    if (acao === 'apagar') {
-      return apagar(planilha, dados.nomes || [dados.nome]);
+  <input id="nome" type="text" placeholder="Nome da pessoa a cadastrar">
+  <input id="email" type="email" placeholder="E-mail da pessoa (receberá os avisos)">
+  <button id="btnCadastrar" disabled>Cadastrar rosto</button>
+  <button id="btnTrocar" class="sec" disabled>Trocar câmera (frontal/traseira)</button>
+  <button id="btnLimpar" class="danger">Apagar todos os cadastros</button>
+
+  <div id="lista"></div>
+
+  <small>
+    Os dados ficam apenas neste aparelho (localStorage). Use somente com o
+    consentimento das pessoas — rostos são dados pessoais sensíveis (LGPD).
+  </small>
+
+  <!-- Biblioteca de reconhecimento facial -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+
+  <script>
+    // ---------- Referências aos elementos da página ----------
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const statusEl = document.getElementById('status');
+    const nomeInput = document.getElementById('nome');
+    const emailInput = document.getElementById('email');
+    const btnCadastrar = document.getElementById('btnCadastrar');
+    const btnTrocar = document.getElementById('btnTrocar');
+    const btnLimpar = document.getElementById('btnLimpar');
+    const listaEl = document.getElementById('lista');
+
+    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+    const opcoes = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
+
+    // ---------- CONFIGURAÇÃO DA PLANILHA ----------
+    // Cole aqui o link gerado pelo Google Apps Script (passo 5 do tutorial)
+    const URL_PLANILHA = 'https://script.google.com/macros/s/AKfycbwn6oTCUa8eteLjjkhSOGlww2I3RorGuBFasHtJQseXw80qRnNUKyUJUn2Pzv-lTuwzyA/exec';
+    // Tempo mínimo (em minutos) para registrar a mesma pessoa de novo
+    const MINUTOS_ENTRE_REGISTROS = 5;
+    const ultimoRegistro = {};
+
+    // ---------- SOM DE CONFIRMAÇÃO ----------
+    // O navegador do celular só permite som depois que a pessoa toca na tela uma vez.
+    let audioCtx = null;
+    let vozLiberada = false;
+    function liberarSom() {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) audioCtx = new AC();
+      }
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      // "Acorda" a voz do navegador com um toque do usuário (necessário em celulares)
+      if (!vozLiberada && 'speechSynthesis' in window) {
+        vozLiberada = true;
+        speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+      }
+    }
+    document.addEventListener('click', liberarSom);
+    document.addEventListener('touchstart', liberarSom);
+
+    // Voz falando o nome da pessoa
+    function falar(nome) {
+      if (!('speechSynthesis' in window)) return;
+      speechSynthesis.cancel();
+      const fala = new SpeechSynthesisUtterance(nome + ' reconhecida com sucesso. Obrigado!');
+      fala.lang = 'pt-BR';
+      fala.rate = 1;
+      fala.volume = 1;
+      speechSynthesis.speak(fala);
     }
 
-    var nome = String(dados.nome || '').trim();
-
-    if (!nome || nome.length > 80) {
-      return resposta('nome invalido');
-    }
-
-    if (acao === 'cadastrar') {
-      return cadastrar(planilha, nome, String(dados.email || '').trim());
-    }
-    return registrar(planilha, nome);
-
-  } catch (erro) {
-    return resposta('erro: ' + erro);
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-// ---------- Cadastro ----------
-function cadastrar(planilha, nome, email) {
-  if (!emailValido(email)) {
-    return resposta('email invalido');
-  }
-  var linha = encontrarLinha(planilha, nome);
-  if (linha > 0) {
-    planilha.getRange(linha, 2).setValue(email); // já existe: só atualiza o e-mail
-    return resposta('email atualizado');
-  }
-  planilha.appendRow([nome, email, '']); // nova linha: NOME, EMAIL, REGISTRO vazio
-  return resposta('cadastrado');
-}
-
-// ---------- Exclusão ----------
-// Apaga a linha inteira de cada nome recebido. A linha 1 (cabeçalho) nunca é apagada.
-function apagar(planilha, nomes) {
-  var apagados = 0;
-  for (var i = 0; i < nomes.length && i < 100; i++) {
-    var nome = String(nomes[i] || '').trim();
-    if (!nome) continue;
-    var linha = encontrarLinha(planilha, nome);
-    if (linha > 0) {
-      planilha.deleteRow(linha);
-      apagados++;
-    }
-  }
-  return resposta('apagados: ' + apagados);
-}
-
-// ---------- Reconhecimento ----------
-function registrar(planilha, nome) {
-  var linha = encontrarLinha(planilha, nome);
-  if (linha < 0) {
-    return resposta('nome nao encontrado');
-  }
-
-  var agora = Utilities.formatDate(new Date(), FUSO, 'dd/MM/yyyy HH:mm:ss');
-  planilha.getRange(linha, 3).setValue(agora); // coluna C = REGISTRO
-
-  var email = String(planilha.getRange(linha, 2).getValue()).trim();
-  if (emailValido(email)) {
-    try {
-      MailApp.sendEmail({
-        to: email,
-        subject: 'Reconhecimento facial: ' + nome + ' identificada(o) em ' + agora,
-        body: 'Olá!\n\n' +
-              'Informamos que ' + nome + ' foi identificada(o) pelo sistema de reconhecimento facial ' +
-              'no dia e horário abaixo:\n\n' +
-              agora + '\n\n' +
-              'Esta é uma mensagem automática. Não é necessário responder.'
+    // Dois bips curtos: um grave e um agudo
+    function tocarSom() {
+      if (!audioCtx) return;
+      const t = audioCtx.currentTime;
+      [880, 1320].forEach((frequencia, i) => {
+        const inicio = t + i * 0.15;
+        const osc = audioCtx.createOscillator();
+        const volume = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = frequencia;
+        volume.gain.setValueAtTime(0.0001, inicio);
+        volume.gain.exponentialRampToValueAtTime(0.3, inicio + 0.02);
+        volume.gain.exponentialRampToValueAtTime(0.0001, inicio + 0.14);
+        osc.connect(volume);
+        volume.connect(audioCtx.destination);
+        osc.start(inicio);
+        osc.stop(inicio + 0.15);
       });
-    } catch (erroEmail) {
-      return resposta('registrado, mas e-mail falhou: ' + erroEmail);
     }
-  }
-  return resposta('ok');
-}
 
-// ---------- Funções de apoio ----------
-// Procura o nome na coluna A e devolve o número da linha (ou -1 se não achar)
-function encontrarLinha(planilha, nome) {
-  var ultima = planilha.getLastRow();
-  if (ultima < 2) return -1;
-  var nomes = planilha.getRange(2, 1, ultima - 1, 1).getValues();
-  var procurado = nome.trim().toLowerCase();
-  for (var i = 0; i < nomes.length; i++) {
-    if (String(nomes[i][0]).trim().toLowerCase() === procurado) {
-      return i + 2;
+    function registrar(nome) {
+      if (!URL_PLANILHA.startsWith('https://')) {
+        statusEl.textContent = '⚠ Reconheci ' + nome + ', mas o link da planilha (URL_PLANILHA) não foi configurado.';
+        return;
+      }
+      const agora = Date.now();
+      if (ultimoRegistro[nome] && agora - ultimoRegistro[nome] < MINUTOS_ENTRE_REGISTROS * 60000) return;
+      ultimoRegistro[nome] = agora;
+      tocarSom();
+      setTimeout(() => falar(nome), 400); // fala logo após os bips
+
+      fetch(URL_PLANILHA, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ acao: 'registrar', nome })
+      })
+        .then(() => {
+          statusEl.textContent = `✔ ${nome} enviada para a planilha às ${new Date().toLocaleTimeString('pt-BR')}`;
+        })
+        .catch(() => {
+          delete ultimoRegistro[nome];
+          statusEl.textContent = 'Erro ao enviar para a planilha. Verifique a internet.';
+        });
     }
-  }
-  return -1;
-}
 
-function emailValido(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
+    // Envia o novo cadastro (nome + e-mail) para a planilha
+    function enviarCadastro(nome, email) {
+      if (!URL_PLANILHA.startsWith('https://')) return;
+      fetch(URL_PLANILHA, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ acao: 'cadastrar', nome, email })
+      })
+        .then(() => {
+          statusEl.textContent = `✔ "${nome}" cadastrada(o) no sistema e enviada(o) para a planilha.`;
+        })
+        .catch(() => {
+          statusEl.textContent = `Rosto cadastrado, mas NÃO foi enviado para a planilha. Verifique a internet.`;
+        });
+    }
 
-function resposta(texto) {
-  return ContentService.createTextOutput(texto);
-}
+    // Apaga um ou mais nomes na planilha (a linha inteira)
+    function apagarNaPlanilha(nomes) {
+      if (!URL_PLANILHA.startsWith('https://')) return;
+      fetch(URL_PLANILHA, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ acao: 'apagar', nomes })
+      })
+        .then(() => {
+          statusEl.textContent = `✔ Cadastro apagado do sistema e da planilha (${nomes.join(', ')}).`;
+        })
+        .catch(() => {
+          statusEl.textContent = 'Apagado neste aparelho, mas NÃO foi apagado da planilha. Verifique a internet.';
+        });
+    }
 
-// Execute esta função UMA VEZ, manualmente, para dar ao script a permissão de enviar e-mails.
-function autorizar() {
-  Logger.log('E-mails restantes hoje: ' + MailApp.getRemainingDailyQuota());
-}
+    // Apaga o cadastro de uma pessoa (pelo botão ✕ da lista)
+    function apagarCadastro(i) {
+      const nome = cadastros[i].nome;
+      if (!confirm(`Apagar o cadastro de "${nome}"? A linha dela também será apagada da planilha.`)) return;
+      cadastros.splice(i, 1);
+      salvar();
+      // Só apaga da planilha se não restar outro rosto com o mesmo nome neste aparelho
+      if (!cadastros.some(c => c.nome === nome)) {
+        apagarNaPlanilha([nome]);
+      } else {
+        statusEl.textContent = `Um dos rostos de "${nome}" foi apagado. Ainda há outro cadastro com esse nome, então a planilha foi mantida.`;
+      }
+    }
+
+    let facing = 'user';      // 'user' = câmera frontal, 'environment' = traseira
+    let cadastros = carregar(); // [{ nome, descritor: [128 números] }]
+
+    // ---------- Armazenamento ----------
+    function carregar() {
+      try { return JSON.parse(localStorage.getItem('rostos')) || []; }
+      catch { return []; }
+    }
+    function salvar() {
+      localStorage.setItem('rostos', JSON.stringify(cadastros));
+      mostrarLista();
+    }
+    function mostrarLista() {
+      listaEl.textContent = '';
+      if (!cadastros.length) {
+        listaEl.textContent = 'Nenhum rosto cadastrado ainda.';
+        return;
+      }
+      const titulo = document.createElement('div');
+      titulo.textContent = 'Cadastrados (toque em ✕ para apagar uma pessoa):';
+      listaEl.appendChild(titulo);
+      cadastros.forEach((c, i) => {
+        const linha = document.createElement('div');
+        linha.className = 'item';
+        const nomeEl = document.createElement('span');
+        nomeEl.textContent = c.nome;
+        const botao = document.createElement('button');
+        botao.className = 'x';
+        botao.textContent = '✕';
+        botao.onclick = () => apagarCadastro(i);
+        linha.appendChild(nomeEl);
+        linha.appendChild(botao);
+        listaEl.appendChild(linha);
+      });
+    }
+
+    // ---------- Câmera ----------
+    async function iniciarCamera() {
+      if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 640 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await new Promise(r => video.onloadedmetadata = r);
+      await video.play();
+      overlay.width = video.videoWidth;
+      overlay.height = video.videoHeight;
+    }
+
+    // ---------- Cadastro ----------
+    btnCadastrar.onclick = async () => {
+      const nome = nomeInput.value.trim();
+      if (!nome) { statusEl.textContent = 'Digite um nome primeiro.'; return; }
+      const email = emailInput.value.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        statusEl.textContent = 'Digite um e-mail válido (exemplo: nome@gmail.com).';
+        return;
+      }
+
+      statusEl.textContent = 'Analisando rosto...';
+      const r = await faceapi
+        .detectSingleFace(video, opcoes)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+      if (!r) { statusEl.textContent = 'Nenhum rosto encontrado. Tente de novo com boa luz.'; return; }
+
+      cadastros.push({ nome, descritor: Array.from(r.descriptor) });
+      salvar();
+      nomeInput.value = '';
+      emailInput.value = '';
+      statusEl.textContent = `Rosto de "${nome}" cadastrado! Enviando para a planilha...`;
+      enviarCadastro(nome, email);
+    };
+
+    btnTrocar.onclick = async () => {
+      facing = facing === 'user' ? 'environment' : 'user';
+      await iniciarCamera();
+    };
+
+    btnLimpar.onclick = () => {
+      if (!cadastros.length) return;
+      if (confirm('Apagar TODOS os rostos deste aparelho e também as linhas deles na planilha? Isso não pode ser desfeito.')) {
+        const nomes = [...new Set(cadastros.map(c => c.nome))];
+        cadastros = [];
+        salvar();
+        apagarNaPlanilha(nomes);
+      }
+    };
+
+    // ---------- Reconhecimento (loop contínuo) ----------
+    async function reconhecer() {
+      const ctx = overlay.getContext('2d');
+
+      async function ciclo() {
+        if (video.readyState >= 2) {
+          const resultados = await faceapi
+            .detectAllFaces(video, opcoes)
+            .withFaceLandmarks()
+            .withFaceDescriptors();
+
+          ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+          // Monta o comparador com os rostos salvos
+          let matcher = null;
+          if (cadastros.length) {
+            const rotulados = cadastros.map(c =>
+              new faceapi.LabeledFaceDescriptors(c.nome, [new Float32Array(c.descritor)])
+            );
+            matcher = new faceapi.FaceMatcher(rotulados, 0.55);
+          }
+
+          for (const r of resultados) {
+            const { x, y, width, height } = r.detection.box;
+            let texto = 'Desconhecido';
+            let cor = '#ff4444';
+
+            if (matcher) {
+              const melhor = matcher.findBestMatch(r.descriptor);
+              if (melhor.label !== 'unknown') {
+                texto = melhor.label;
+                cor = '#33dd77';
+                registrar(melhor.label);
+              }
+            }
+
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = cor;
+            ctx.strokeRect(x, y, width, height);
+
+            ctx.font = 'bold 20px system-ui';
+            const larg = ctx.measureText(texto).width + 12;
+            ctx.fillStyle = cor;
+            ctx.fillRect(x, y - 28, larg, 28);
+            ctx.fillStyle = '#000';
+            ctx.fillText(texto, x + 6, y - 7);
+          }
+        }
+        setTimeout(ciclo, 150);
+      }
+      ciclo();
+    }
+
+    // ---------- Inicialização ----------
+    (async () => {
+      mostrarLista();
+      try {
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+          faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+        ]);
+        statusEl.textContent = 'Ativando câmera...';
+        await iniciarCamera();
+        statusEl.textContent = 'Pronto! Toque na tela uma vez para ativar o som e aponte a câmera.';
+        btnCadastrar.disabled = false;
+        btnTrocar.disabled = false;
+        reconhecer();
+      } catch (e) {
+        statusEl.textContent = 'Erro: ' + e.message +
+          ' (a câmera exige HTTPS ou localhost e permissão do usuário)';
+      }
+    })();
+  </script>
+</body>
+</html>
