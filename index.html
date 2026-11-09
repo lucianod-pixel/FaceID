@@ -1,7 +1,8 @@
-// Código para colar no Google Apps Script (dentro da sua planilha) — VERSÃO 2
+// Código para colar no Google Apps Script (dentro da sua planilha) — VERSÃO 3
 // Colunas esperadas na primeira aba: A = NOME, B = EMAIL, C = REGISTRO
 //
-// Este código faz duas coisas:
+// Este código faz três coisas:
+//  0) "apagar": quando um cadastro é apagado no site, apaga também a linha dele na planilha.
 //  1) "cadastrar": quando uma pessoa é cadastrada no site, cria (ou atualiza) a linha dela na planilha.
 //  2) "registrar": quando uma pessoa é reconhecida, grava data/hora em REGISTRO e envia um e-mail
 //     para o endereço da coluna EMAIL.
@@ -14,13 +15,17 @@ function doPost(e) {
     lock.waitLock(10000); // evita que dois envios simultâneos se atropelem
     var dados = JSON.parse(e.postData.contents);
     var acao = dados.acao || 'registrar';
+    var planilha = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+
+    if (acao === 'apagar') {
+      return apagar(planilha, dados.nomes || [dados.nome]);
+    }
+
     var nome = String(dados.nome || '').trim();
 
     if (!nome || nome.length > 80) {
       return resposta('nome invalido');
     }
-
-    var planilha = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
 
     if (acao === 'cadastrar') {
       return cadastrar(planilha, nome, String(dados.email || '').trim());
@@ -46,6 +51,22 @@ function cadastrar(planilha, nome, email) {
   }
   planilha.appendRow([nome, email, '']); // nova linha: NOME, EMAIL, REGISTRO vazio
   return resposta('cadastrado');
+}
+
+// ---------- Exclusão ----------
+// Apaga a linha inteira de cada nome recebido. A linha 1 (cabeçalho) nunca é apagada.
+function apagar(planilha, nomes) {
+  var apagados = 0;
+  for (var i = 0; i < nomes.length && i < 100; i++) {
+    var nome = String(nomes[i] || '').trim();
+    if (!nome) continue;
+    var linha = encontrarLinha(planilha, nome);
+    if (linha > 0) {
+      planilha.deleteRow(linha);
+      apagados++;
+    }
+  }
+  return resposta('apagados: ' + apagados);
 }
 
 // ---------- Reconhecimento ----------
